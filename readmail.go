@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 	ui "github.com/gizak/termui"
-	"math"
-	// "mime/multipart"
+	"io"
+	"io/ioutil"
 	"log"
+	"math"
+	"mime"
+	"mime/multipart"
 	"net/mail"
 	"os"
 	"strings"
@@ -22,8 +25,6 @@ var IMAP_SERVER = os.Getenv("GOMAIL_IMAP_SERVER")
 // This usually seems to retrieve multi-part messages in MIME format,
 // which is what we want, so we can select the text/plain component.
 var BODY_PART_NAME = "RFC822"
-
-// var BODY_PART_NAME = "RFC822.TEXT"
 
 var _file, _ = os.OpenFile("gomail.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 var LOG = log.New(_file, "gomail: ", log.Ldate|log.Lshortfile|log.Ltime)
@@ -53,49 +54,64 @@ func messageAttr(message *imap.MessageInfo, attrName string) *mail.Message {
 	return msg
 }
 
-func retrieveMultipartText(message *imap.MessageInfo) []string {
-	return []string{"hi"}
-}
-
-func retrieveSimpleText(message *imap.MessageInfo) []string {
-	return []string{"world"}
-}
-
-// Get the multipart boundary for a multipart MIME message as the first return value.
-// The error returned as the second value is non-nil if the message is not multipart.
-func multipartBoundary(message *imap.MessageInfo) (string, error) {
-	var err error = nil
-	// Get content-type of the message.
-	contentType := ""
-	msg := messageAttr(message, "RFC822")
-	if msg != nil {
-		contentType = msg.Header.Get("content-type")
+// Get the reader for a particular Part of a multipart message.
+// This function is called recursively until we find a text/plain part.
+func partReader(part *multipart.Part) (io.Reader, error) {
+	mediaType, params, err := mime.ParseMediaType(part.Header.Get("Content-Type"))
+	if err != nil {
+		return nil, err
 	}
-	// Parameters within content-type are separated by semicolons.
-	contentTypeParams := strings.Split(contentType, ";")
-	// Is this a multipart MIME message?
-	isMultipart := (strings.Index(contentTypeParams[0], "multipart") >= 0)
-	// The delimiter between parts in a multipart MIME message.
-	boundary := ""
-	if isMultipart {
-		for _, param := range contentTypeParams {
-			trimmed := strings.TrimSpace(param)
-			if paramValue := strings.TrimPrefix(trimmed, "boundary="); paramValue != trimmed {
-				boundary = paramValue
-				break
+
+	if strings.HasPrefix(mediaType, "multipart/") {
+		LOG.Println("inner-part boundary: %s\n", params["boundary"])
+		mpReader := multipart.NewReader(part, params["boundary"])
+		for {
+			nextPart, err := mpReader.NextPart()
+			if err == io.EOF {
+				LOG.Println("Reached EOF while scanning inner message parts.")
+				return nil, err
+			}
+			panicMaybe(err)
+			nextReader, err := partReader(nextPart)
+			if nextReader != nil {
+				return nextReader, err
 			}
 		}
-	} else {
-		err = errors.New("message is not multipart")
+	} else if mediaType == "text/plain" {
+		return part, nil
 	}
-
-	return boundary, err
+	return nil, errors.New("Not a text/plain part")
 }
 
-// if message is multipart:
-//   get text from multipart message
-// else:
-//   get text from not multipart message
+func messageReader(message *imap.MessageInfo) (io.Reader, error) {
+	// Get content-type of the message.
+	msg := messageAttr(message, BODY_PART_NAME)
+	if msg != nil {
+		mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+		if err != nil {
+			return nil, err
+		}
+		if strings.HasPrefix(mediaType, "multipart/") {
+			mpReader := multipart.NewReader(msg.Body, params["boundary"])
+			for {
+				part, err := mpReader.NextPart()
+				textPlainPart, err := partReader(part)
+				if err == io.EOF {
+					LOG.Println("Reached EOF while reading multipart message")
+					return nil, err
+				}
+				panicMaybe(err)
+				if textPlainPart != nil {
+					return textPlainPart, err
+				}
+			}
+		} else if mediaType == "text/plain" {
+			return msg.Body, nil
+		}
+		return nil, errors.New("No text/plain message part found")
+	}
+	return nil, errors.New("Could not find message body")
+}
 
 func readMessage(message *imap.MessageInfo) {
 	set := new(imap.SeqSet)
@@ -103,28 +119,16 @@ func readMessage(message *imap.MessageInfo) {
 	cmd, err := imap.Wait(c.Fetch(set, BODY_PART_NAME))
 	panicMaybe(err)
 
-	var messageBody = ""
-	for _, rsp = range cmd.Data {
-		msg := messageAttr(rsp.MessageInfo(), BODY_PART_NAME)
-		if msg != nil {
-			buff := make([]byte, 1000)
-			mustSucceed(msg.Body.Read(buff))
-			boundary, _ := multipartBoundary(rsp.MessageInfo())
-			if len(boundary) > 0 {
-				messageBody = "<<< multipart: " + boundary + " >>>" + string(buff)
-			} else {
-				messageBody = string(buff)
-			}
-		} else {
-			fmt.Println("No body?")
-		}
-	}
+	reader, err := messageReader(cmd.Data[0].MessageInfo())
+	panicMaybe(err)
+	messageBody, err := ioutil.ReadAll(reader)
+	messageBodyStr := string(messageBody)
 
-	if messageBody == "" {
-		fmt.Println("message body was empty")
+	if len(messageBodyStr) <= 0 {
+		LOG.Printf("Message body was empty or could not be retrieved: +%v\n", err)
 		return
 	}
-	msgBox := ui.NewPar(messageBody)
+	msgBox := ui.NewPar(messageBodyStr)
 	msgBox.Border.Label = "demo list"
 	msgBox.Height = ui.TermHeight()
 	msgBox.Width = ui.TermWidth()
