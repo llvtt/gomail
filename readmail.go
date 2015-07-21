@@ -25,6 +25,7 @@ var IMAP_SERVER = os.Getenv("GOMAIL_IMAP_SERVER")
 // This usually seems to retrieve multi-part messages in MIME format,
 // which is what we want, so we can select the text/plain component.
 var BODY_PART_NAME = "RFC822"
+var HEADER_PART_NAME = "RFC822.HEADER"
 
 var _file, _ = os.OpenFile("gomail.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 var LOG = log.New(_file, "gomail: ", log.Ldate|log.Lshortfile|log.Ltime)
@@ -39,11 +40,6 @@ func panicMaybe(err error) {
 	if err != nil {
 		panic(err)
 	}
-}
-
-func mustSucceed(result interface{}, err error) interface{} {
-	panicMaybe(err)
-	return result
 }
 
 // Get a Message out of a MessageInfo attribute.
@@ -143,8 +139,8 @@ func listMessages(messages []*imap.MessageInfo) {
 	messageStrings := func(index int) []string {
 		strs := make([]string, len(messages), len(messages))
 		for idx, message := range messages {
-			header := imap.AsBytes(message.Attrs["RFC822.HEADER"])
-			if msg, _ := mail.ReadMessage(bytes.NewReader(header)); msg != nil {
+			msg := messageAttr(message, HEADER_PART_NAME)
+			if msg != nil {
 				subject := msg.Header.Get("Subject")
 				if idx == index {
 					strs = append(strs, "> "+subject)
@@ -256,7 +252,7 @@ func main() {
 	} else {
 		set.Add("1:*")
 	}
-	cmd, _ = imap.Wait(c.Fetch(set, "RFC822.HEADER"))
+	cmd, _ = imap.Wait(c.Fetch(set, HEADER_PART_NAME))
 
 	messages := make([]*imap.MessageInfo, 0, 0)
 	for _, rsp = range cmd.Data {
@@ -275,7 +271,7 @@ func main() {
 
 	// 	// Process command data
 	// 	for _, rsp = range cmd.Data {
-	// 		header := imap.AsBytes(rsp.MessageInfo().Attrs["RFC822.HEADER"])
+	// 		header := imap.AsBytes(rsp.MessageInfo().Attrs[HEADER_PART_NAME])
 	// 		if msg, _ := mail.ReadMessage(bytes.NewReader(header)); msg != nil {
 	// 			fmt.Println("|--", msg.Header.Get("Subject"))
 	// 		}
