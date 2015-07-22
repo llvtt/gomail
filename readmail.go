@@ -1,15 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"code.google.com/p/go-imap/go1/imap"
 	"errors"
 	"fmt"
 	ui "github.com/gizak/termui"
 	"io"
-	"io/ioutil"
 	"log"
-	"math"
 	"mime"
 	"mime/multipart"
 	"net/mail"
@@ -40,6 +39,20 @@ func panicMaybe(err error) {
 	if err != nil {
 		panic(err)
 	}
+}
+
+func max(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // Get a Message out of a MessageInfo attribute.
@@ -117,20 +130,52 @@ func readMessage(message *imap.MessageInfo) {
 
 	reader, err := messageReader(cmd.Data[0].MessageInfo())
 	panicMaybe(err)
-	messageBody, err := ioutil.ReadAll(reader)
-	messageBodyStr := string(messageBody)
+
+	scanner := bufio.NewScanner(reader)
+	var lines []string
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	messageBodyStr := strings.Join(lines[:min(len(lines), ui.TermHeight()-2)], "\n")
 
 	if len(messageBodyStr) <= 0 {
 		LOG.Printf("Message body was empty or could not be retrieved: +%v\n", err)
 		return
 	}
+
 	msgBox := ui.NewPar(messageBodyStr)
-	msgBox.Border.Label = "demo list"
+	msgBox.Border.Label = "Reading Message"
 	msgBox.Height = ui.TermHeight()
 	msgBox.Width = ui.TermWidth()
 	msgBox.Y = 0
-
 	ui.Render(msgBox)
+
+	topLineIndex := 0
+
+	redraw := make(chan bool)
+
+	for {
+		select {
+		case e := <-ui.EventCh():
+			switch e.Key {
+			case ui.KeyArrowDown:
+				topLineIndex = max(0, min(
+					len(lines)-msgBox.Height/2,
+					topLineIndex+1))
+				go func() { redraw <- true }()
+			case ui.KeyArrowUp:
+				topLineIndex = max(0, topLineIndex-1)
+				go func() { redraw <- true }()
+			case ui.KeyEsc:
+				// back to "list messages"
+				return
+			}
+		case <-redraw:
+			messageBodyStr = strings.Join(lines[topLineIndex+1:], "\n")
+			msgBox.Text = messageBodyStr
+			ui.Render(msgBox)
+		}
+	}
 }
 
 func listMessages(messages []*imap.MessageInfo) {
@@ -180,17 +225,14 @@ func listMessages(messages []*imap.MessageInfo) {
 				case ui.KeyEsc:
 					return
 				case ui.KeyArrowUp:
-					selectedIndex = int(math.Max(
-						0,
-						float64(selectedIndex-1)))
+					selectedIndex = max(0, selectedIndex-1)
 					go func() { redraw <- true }()
 				case ui.KeyArrowDown:
-					selectedIndex = int(math.Min(
-						float64(len(messages)-1),
-						float64(selectedIndex+1)))
+					selectedIndex = min(len(messages)-1, selectedIndex+1)
 					go func() { redraw <- true }()
 				case ui.KeyEnter:
 					readMessage(messages[selectedIndex])
+					go func() { redraw <- true }()
 				}
 			}
 		case <-redraw:
